@@ -1,0 +1,1239 @@
+#written by Ian Gleeson
+#runs in CPython 3.6 64bit
+#MidV interpter
+#Raystattion 12A
+#2022 Sept
+from connect import *
+import math
+from math import ceil, floor
+from connect import *
+import connect, ctypes, sys
+from tkinter import *
+from tkinter import messagebox
+import os
+import numpy as np
+
+script_version = 8.0
+script_name = 'MidV'
+
+###########next buttons to select course and then autoplan
+root = Tk()
+root.title("MidV v" + str(script_version))
+mycolour = '#%02x%02x%02x' % (50, 50, 50)
+myorange = '#%02x%02x%02x' % (255, 140, 0)
+root.configure(background = mycolour)
+root.geometry("600x700")
+######add label#######################
+lbl1 = Label(root, text='This script will deform the bin3 GTV contour to all other 4D bins via deformable image registration')
+lbl1.pack()
+#lbl1.place(x=65, y =5)
+lbl1.configure(background = mycolour, fg = "white", justify=CENTER)
+
+#####################################################################################
+try:
+    patient = get_current("Patient")
+    case = get_current("Case")
+except:
+    root = Tk()
+    root.withdraw()
+    messagebox.showerror("Error - MidV v" + str(script_version), "No patients case loaded. Please open a patients case")
+    exit()
+    
+
+##get target roi list for tkinter
+#roi_names = System.Collections.Generic.List[str]()
+rois = case.PatientModel.RegionsOfInterest
+
+roi_list = []
+    
+for roi in rois:
+    if roi.OrganData.OrganType == "Target":
+        roi_list.append(roi.Name)
+
+#identify the exmination group of interest from user
+EGS = case.ExaminationGroups
+
+EGS_list = []
+    
+for EG in EGS:
+    EGS_list.append(EG.Name)
+    
+    
+##get planning ct scans list to pick which one to use
+RCTS_list = []
+for RCT in case.Examinations:
+    if "RCT" in RCT.Name:
+        RCTS_list.append(RCT.Name)
+
+
+
+#dir done using ref bin3 4dct name and targets are remaining exams in that group except 3rd one
+def MidV():
+    #identify the examniations within the exam group of interest and number in total by len = 10/11?
+    examination_group = clicked2.get()
+
+    #loop through exam group above and append those 10/11 examinations to a list then remove the 3rd one after sorted?assumes 3rd is bin 3?
+    exams = case.ExaminationGroups[str(examination_group)].Items
+    
+    fourd_exams_list = []
+
+    for fourds in exams:
+        fourd_exams_list.append(fourds.ItemNumber)
+
+    fourd_exams_list.sort()
+
+    number_bins = len(fourd_exams_list)  # 10 or 11
+    
+    ##idenify bin3 examination name
+    if number_bins == 10:
+        bin1_exam = case.ExaminationGroups[str(examination_group)].Items[0].Examination.Name 
+        bin2_exam = case.ExaminationGroups[str(examination_group)].Items[1].Examination.Name 
+        bin3_exam = case.ExaminationGroups[str(examination_group)].Items[2].Examination.Name 
+        bin4_exam = case.ExaminationGroups[str(examination_group)].Items[3].Examination.Name 
+        bin5_exam = case.ExaminationGroups[str(examination_group)].Items[4].Examination.Name 
+        bin6_exam = case.ExaminationGroups[str(examination_group)].Items[5].Examination.Name 
+        bin7_exam = case.ExaminationGroups[str(examination_group)].Items[6].Examination.Name 
+        bin8_exam = case.ExaminationGroups[str(examination_group)].Items[7].Examination.Name 
+        bin9_exam = case.ExaminationGroups[str(examination_group)].Items[8].Examination.Name
+        bin10_exam = case.ExaminationGroups[str(examination_group)].Items[9].Examination.Name
+    elif number_bins != 10:
+        root = Tk()
+        root.withdraw()
+        messagebox.showerror("Error - MidV v" + str(script_version), "Script works for ten 4D bins only")
+        exit()
+        
+                
+    #identify the roi of interert from user 
+    roi = clicked1.get()
+
+    #check roi of interest exists on the bin3 exam from exam group above
+    roi_structures = case.PatientModel.StructureSets[str(bin3_exam)].RoiGeometries
+    if roi_structures[str(roi)].HasContours() is False:
+        root = Tk()
+        root.withdraw()
+        messagebox.showerror("Error - MidV v" + str(script_version), "Contour" + str(roi) + "needs outlining first on bin3")
+        exit()
+
+    #need skin/external on scans before any dir done so check and do if not there on all 4dct scans
+    #make exam bin3 primary first and then apply to all bins in exam group
+    RCT_exam = clicked3.get()
+    
+    try:
+        examination = case.Examinations[str(RCT_exam)]
+        examination.SetPrimary()
+        retval_0 = case.PatientModel.CreateRoi(Name=r"Skin", Color="Green", Type="External", TissueName=r"", RbeCellTypeName=None, RoiMaterial=None)
+        retval_0.CreateExternalGeometry(Examination=examination, ThresholdLevel=-250)
+    except:
+        pass  #skin must exist already with geometry on RCT
+    
+    try:
+        #examination = case.Examinations[str(bin3_exam)]
+        #examination.SetPrimary()
+        case.PatientModel.RegionsOfInterest['Skin'].CreateExternalGeometries(ReferenceExamination=examination, AdditionalExaminationNames=[str(bin1_exam), str(bin2_exam), str(bin3_exam), str(bin4_exam), str(bin5_exam), str(bin6_exam), str(bin7_exam), str(bin8_exam), str(bin9_exam), str(bin10_exam)], ReferenceThresholdLevel=-250)
+    except:
+        pass #skin must exist on 4d bins already
+
+
+    ##make the focus2cm roi for dir - grow gtvbin3 2cm on ctbin3
+    examination = case.Examinations[str(bin3_exam)]
+    examination.SetPrimary()
+    try:
+        retval_01 = case.PatientModel.CreateRoi(Name=r"focus2cm", Color="Pink", Type="Organ", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+
+        retval_01.SetMarginExpression(SourceRoiName=str(roi), MarginSettings={ 'Type': "Expand", 'Superior': 2, 'Inferior': 2, 'Anterior': 2, 'Posterior': 2, 'Right': 2, 'Left': 2 })
+
+        retval_01.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+    except:
+        pass # focus2cm already there?
+        
+    examination = case.Examinations[str(RCT_exam)]
+    examination.SetPrimary()
+        
+
+    #do the dir of gtv from bin3 to all other bins in selected 4dct group
+    case.PatientModel.CreateHybridDeformableRegistrationGroup(RegistrationGroupName=r"HybridDefReg_focus2cm", ReferenceExaminationName=str(bin3_exam), TargetExaminationNames=[str(bin1_exam), str(bin2_exam), str(bin4_exam), str(bin5_exam), str(bin6_exam), str(bin7_exam), str(bin8_exam), str(bin9_exam), str(bin10_exam)], ControllingRoiNames=[], ControllingPoiNames=[], FocusRoiNames=[r"focus2cm"], AlgorithmSettings={ 'NumberOfResolutionLevels': 6, 'InitialResolution': { 'x': 0.5, 'y': 0.5, 'z': 0.5 }, 'FinalResolution': { 'x': 0.25, 'y': 0.25, 'z': 0.3 }, 'InitialGaussianSmoothingSigma': 2, 'FinalGaussianSmoothingSigma': 0.333333333333333, 'InitialGridRegularizationWeight': 1500, 'FinalGridRegularizationWeight': 400, 'ControllingRoiWeight': 0.5, 'ControllingPoiWeight': 0.1, 'MaxNumberOfIterationsPerResolutionLevel': 1000, 'ImageSimilarityMeasure': "CorrelationCoefficient", 'DeformationStrategy': "InternalLung", 'ConvergenceTolerance': 1E-05 })
+    
+    case.MapRoiGeometriesDeformably(RoiGeometryNames=[str(roi)], CreateNewRois=False, StructureRegistrationGroupNames=[r"HybridDefReg_focus2cm"], ReferenceExaminationNames=[str(bin3_exam)], TargetExaminationNames=[str(bin1_exam)], ReverseMapping=False, AbortWhenBadDisplacementField=False)
+    case.MapRoiGeometriesDeformably(RoiGeometryNames=[str(roi)], CreateNewRois=False, StructureRegistrationGroupNames=[r"HybridDefReg_focus2cm"], ReferenceExaminationNames=[str(bin3_exam)], TargetExaminationNames=[str(bin2_exam)], ReverseMapping=False, AbortWhenBadDisplacementField=False)
+    case.MapRoiGeometriesDeformably(RoiGeometryNames=[str(roi)], CreateNewRois=False, StructureRegistrationGroupNames=[r"HybridDefReg_focus2cm"], ReferenceExaminationNames=[str(bin3_exam)], TargetExaminationNames=[str(bin4_exam)], ReverseMapping=False, AbortWhenBadDisplacementField=False)
+    case.MapRoiGeometriesDeformably(RoiGeometryNames=[str(roi)], CreateNewRois=False, StructureRegistrationGroupNames=[r"HybridDefReg_focus2cm"], ReferenceExaminationNames=[str(bin3_exam)], TargetExaminationNames=[str(bin5_exam)], ReverseMapping=False, AbortWhenBadDisplacementField=False)
+    case.MapRoiGeometriesDeformably(RoiGeometryNames=[str(roi)], CreateNewRois=False, StructureRegistrationGroupNames=[r"HybridDefReg_focus2cm"], ReferenceExaminationNames=[str(bin3_exam)], TargetExaminationNames=[str(bin6_exam)], ReverseMapping=False, AbortWhenBadDisplacementField=False)
+    case.MapRoiGeometriesDeformably(RoiGeometryNames=[str(roi)], CreateNewRois=False, StructureRegistrationGroupNames=[r"HybridDefReg_focus2cm"], ReferenceExaminationNames=[str(bin3_exam)], TargetExaminationNames=[str(bin7_exam)], ReverseMapping=False, AbortWhenBadDisplacementField=False)
+    case.MapRoiGeometriesDeformably(RoiGeometryNames=[str(roi)], CreateNewRois=False, StructureRegistrationGroupNames=[r"HybridDefReg_focus2cm"], ReferenceExaminationNames=[str(bin3_exam)], TargetExaminationNames=[str(bin8_exam)], ReverseMapping=False, AbortWhenBadDisplacementField=False)
+    case.MapRoiGeometriesDeformably(RoiGeometryNames=[str(roi)], CreateNewRois=False, StructureRegistrationGroupNames=[r"HybridDefReg_focus2cm"], ReferenceExaminationNames=[str(bin3_exam)], TargetExaminationNames=[str(bin9_exam)], ReverseMapping=False, AbortWhenBadDisplacementField=False)
+    case.MapRoiGeometriesDeformably(RoiGeometryNames=[str(roi)], CreateNewRois=False, StructureRegistrationGroupNames=[r"HybridDefReg_focus2cm"], ReferenceExaminationNames=[str(bin3_exam)], TargetExaminationNames=[str(bin10_exam)], ReverseMapping=False, AbortWhenBadDisplacementField=False)
+    
+    
+    ###################################################################################################################################################################################################
+    ###################################################################################################################################################################################################
+    #GET MAX DISTANCE TO AGREEMENT ETC FOR ALL BINS SUMMED GTV VS DRS 4D GTV
+    round_MDA = 0
+    def compare_GTV_4D_to_ITV_MDA():
+        nonlocal round_MDA
+        roi = clicked1.get()
+        print(str(roi))
+        #create an itv roi fro all gtv bins and have its geometry on RCT3
+        #make 10 ITV_compare rois on RCT3 called ITV_compare1, ITV_compare2 etc 
+        case.PatientModel.CreateRoi(Name=r"ITV_compare1", Color="Cyan", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+        case.PatientModel.CreateRoi(Name=r"ITV_compare2", Color="Cyan", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+        case.PatientModel.CreateRoi(Name=r"ITV_compare3", Color="Cyan", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+        case.PatientModel.CreateRoi(Name=r"ITV_compare4", Color="Cyan", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+        case.PatientModel.CreateRoi(Name=r"ITV_compare5", Color="Cyan", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+        case.PatientModel.CreateRoi(Name=r"ITV_compare6", Color="Cyan", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+        case.PatientModel.CreateRoi(Name=r"ITV_compare7", Color="Cyan", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+        case.PatientModel.CreateRoi(Name=r"ITV_compare8", Color="Cyan", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+        case.PatientModel.CreateRoi(Name=r"ITV_compare9", Color="Cyan", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+        case.PatientModel.CreateRoi(Name=r"ITV_compare10", Color="Cyan", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+
+
+        #COPY 10 GTV BINS FROM THIER EXAMS INTO EACH ITV_compare1 etc
+        #make 4dct1 primary
+        examination = case.Examinations[str(bin1_exam)]
+        examination.SetPrimary()
+        #copy geometry of bin3 gtv into itv_compare1
+        retval_0 = case.PatientModel.RegionsOfInterest['ITV_compare1'].SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [str(roi)], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        #copy itv_compare geometry into RCT3
+        case.PatientModel.CopyRoiGeometries(SourceExamination=examination, TargetExaminationNames=[str(RCT_exam)], RoiNames=[r"ITV_compare1"], ImageRegistrationNames=[], TargetExaminationNamesToSkipAddedReg=[str(RCT_exam)])
+
+        #make 4dct1 primary
+        examination = case.Examinations[str(bin2_exam)]
+        examination.SetPrimary()
+        #copy geometry of bin3 gtv into itv_compare1
+        retval_0 = case.PatientModel.RegionsOfInterest['ITV_compare2'].SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [str(roi)], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        #copy itv_compare geometry into RCT3
+        case.PatientModel.CopyRoiGeometries(SourceExamination=examination, TargetExaminationNames=[str(RCT_exam)], RoiNames=[r"ITV_compare2"], ImageRegistrationNames=[], TargetExaminationNamesToSkipAddedReg=[str(RCT_exam)])
+
+        #make 4dct1 primary
+        examination = case.Examinations[str(bin3_exam)]
+        examination.SetPrimary()
+        #copy geometry of bin3 gtv into itv_compare1
+        retval_0 = case.PatientModel.RegionsOfInterest['ITV_compare3'].SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [str(roi)], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        #copy itv_compare geometry into RCT3
+        case.PatientModel.CopyRoiGeometries(SourceExamination=examination, TargetExaminationNames=[str(RCT_exam)], RoiNames=[r"ITV_compare3"], ImageRegistrationNames=[], TargetExaminationNamesToSkipAddedReg=[str(RCT_exam)])
+
+        #make 4dct1 primary
+        examination = case.Examinations[str(bin4_exam)]
+        examination.SetPrimary()
+        #copy geometry of bin3 gtv into itv_compare1
+        retval_0 = case.PatientModel.RegionsOfInterest['ITV_compare4'].SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [str(roi)], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        #copy itv_compare geometry into RCT3
+        case.PatientModel.CopyRoiGeometries(SourceExamination=examination, TargetExaminationNames=[str(RCT_exam)], RoiNames=[r"ITV_compare4"], ImageRegistrationNames=[], TargetExaminationNamesToSkipAddedReg=[str(RCT_exam)])
+
+        #make 4dct1 primary
+        examination = case.Examinations[str(bin5_exam)]
+        examination.SetPrimary()
+        #copy geometry of bin3 gtv into itv_compare1
+        retval_0 = case.PatientModel.RegionsOfInterest['ITV_compare5'].SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [str(roi)], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        #copy itv_compare geometry into RCT3
+        case.PatientModel.CopyRoiGeometries(SourceExamination=examination, TargetExaminationNames=[str(RCT_exam)], RoiNames=[r"ITV_compare5"], ImageRegistrationNames=[], TargetExaminationNamesToSkipAddedReg=[str(RCT_exam)])
+
+        #make 4dct1 primary
+        examination = case.Examinations[str(bin6_exam)]
+        examination.SetPrimary()
+        #copy geometry of bin3 gtv into itv_compare1
+        retval_0 = case.PatientModel.RegionsOfInterest['ITV_compare6'].SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [str(roi)], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        #copy itv_compare geometry into RCT3
+        case.PatientModel.CopyRoiGeometries(SourceExamination=examination, TargetExaminationNames=[str(RCT_exam)], RoiNames=[r"ITV_compare6"], ImageRegistrationNames=[], TargetExaminationNamesToSkipAddedReg=[str(RCT_exam)])
+
+        #make 4dct1 primary
+        examination = case.Examinations[str(bin7_exam)]
+        examination.SetPrimary()
+        #copy geometry of bin3 gtv into itv_compare1
+        retval_0 = case.PatientModel.RegionsOfInterest['ITV_compare7'].SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [str(roi)], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        #copy itv_compare geometry into RCT3
+        case.PatientModel.CopyRoiGeometries(SourceExamination=examination, TargetExaminationNames=[str(RCT_exam)], RoiNames=[r"ITV_compare7"], ImageRegistrationNames=[], TargetExaminationNamesToSkipAddedReg=[str(RCT_exam)])
+
+        #make 4dct1 primary
+        examination = case.Examinations[str(bin8_exam)]
+        examination.SetPrimary()
+        #copy geometry of bin3 gtv into itv_compare1
+        retval_0 = case.PatientModel.RegionsOfInterest['ITV_compare8'].SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [str(roi)], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        #copy itv_compare geometry into RCT3
+        case.PatientModel.CopyRoiGeometries(SourceExamination=examination, TargetExaminationNames=[str(RCT_exam)], RoiNames=[r"ITV_compare8"], ImageRegistrationNames=[], TargetExaminationNamesToSkipAddedReg=[str(RCT_exam)])
+
+        #make 4dct1 primary
+        examination = case.Examinations[str(bin9_exam)]
+        examination.SetPrimary()
+        #copy geometry of bin3 gtv into itv_compare1
+        retval_0 = case.PatientModel.RegionsOfInterest['ITV_compare9'].SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [str(roi)], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        #copy itv_compare geometry into RCT3
+        case.PatientModel.CopyRoiGeometries(SourceExamination=examination, TargetExaminationNames=[str(RCT_exam)], RoiNames=[r"ITV_compare9"], ImageRegistrationNames=[], TargetExaminationNamesToSkipAddedReg=[str(RCT_exam)])
+
+        #make 4dct1 primary
+        examination = case.Examinations[str(bin10_exam)]
+        examination.SetPrimary()
+        #copy geometry of bin3 gtv into itv_compare1
+        retval_0 = case.PatientModel.RegionsOfInterest['ITV_compare10'].SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [str(roi)], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        #copy itv_compare geometry into RCT3
+        case.PatientModel.CopyRoiGeometries(SourceExamination=examination, TargetExaminationNames=[str(RCT_exam)], RoiNames=[r"ITV_compare10"], ImageRegistrationNames=[], TargetExaminationNamesToSkipAddedReg=[str(RCT_exam)])
+
+
+        #sum all ITV_compare rois to roi called ITV_compare_final
+        #make rct primary
+        examination = case.Examinations[str(RCT_exam)]
+        examination.SetPrimary()
+
+
+        retval_0 = case.PatientModel.CreateRoi(Name=r"ITV_compare_final", Color="Yellow", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+
+        retval_0.SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [r"ITV_compare1", r"ITV_compare2", r"ITV_compare3", r"ITV_compare4", r"ITV_compare5", r"ITV_compare6", r"ITV_compare7", r"ITV_compare8", r"ITV_compare9", r"ITV_compare10"], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+
+        ####COMPARE THE itv roi with the GTV_4D roi on RCT3 . 
+        #CHECKS WE HAVE A 4DGTV ROI ON PLAN SCAN
+        rois = case.PatientModel.RegionsOfInterest 
+        roi_list = []
+        for roi in rois:
+            roi_list.append(roi.Name)
+            
+        if 'GTV_4D' not in roi_list:
+            await_user_input("Please ensure you have an roi called 'GTV_4D on planning CT. Click resume script once you have done this.")
+    
+    
+        measures = case.PatientModel.StructureSets[str(RCT_exam)].ComparisonOfRoiGeometries(RoiA = 'GTV_4D', RoiB = 'ITV_compare_final',ComputeDistanceToAgreementMeasures=True)
+
+        list(measures.items())[0]  #dice
+        list(measures.items())[1]  #precision
+        list(measures.items())[2]  #sensitivity
+        list(measures.items())[3]  #specificity
+        list(measures.items())[4]  #mean da
+        list(measures.items())[5]  #max da
+
+        print(measures["DiceSimilarityCoefficient"])  #0.936
+        print(measures["MaxDistanceToAgreement"])    #0.27
+        print(measures["MeanDistanceToAgreement"])  #0.04
+        print(measures["Precision"])  #0.881
+        print(measures["Sensitivity"])  #0.9924
+        print(measures["Specificity"])   #0.919
+        
+        round_MDA = round(measures["MaxDistanceToAgreement"],2)
+        print(round_MDA)
+
+        ###delete the 10 itv compares and itv final roi as not needed again
+        case.PatientModel.RegionsOfInterest['ITV_compare1'].DeleteRoi()
+        case.PatientModel.RegionsOfInterest['ITV_compare2'].DeleteRoi()
+        case.PatientModel.RegionsOfInterest['ITV_compare3'].DeleteRoi()
+        case.PatientModel.RegionsOfInterest['ITV_compare4'].DeleteRoi()
+        case.PatientModel.RegionsOfInterest['ITV_compare5'].DeleteRoi()
+        case.PatientModel.RegionsOfInterest['ITV_compare6'].DeleteRoi()
+        case.PatientModel.RegionsOfInterest['ITV_compare7'].DeleteRoi()
+        case.PatientModel.RegionsOfInterest['ITV_compare8'].DeleteRoi()
+        case.PatientModel.RegionsOfInterest['ITV_compare9'].DeleteRoi()
+        case.PatientModel.RegionsOfInterest['ITV_compare10'].DeleteRoi()
+        case.PatientModel.RegionsOfInterest['ITV_compare_final'].DeleteRoi()
+
+        ###################################################################################################################################################################################################
+    
+        ###################################################################################################################################################################################################
+    texte_gtv_warning = 0    
+    def gtv_volume_compare():
+        nonlocal texte_gtv_warning
+        list_exam_full = [str(bin1_exam), str(bin2_exam), str(bin3_exam), str(bin4_exam), str(bin5_exam), str(bin6_exam), str(bin7_exam), str(bin8_exam), str(bin9_exam), str(bin10_exam)]
+
+        texte_gtv_warning = "GTV_bin3 volume has difference greater than 10% from other GTVs" 
+
+        volume_GTV_ref = round(case.PatientModel.StructureSets[str(bin3_exam)].RoiGeometries[str(roi)].GetRoiVolume(),2)
+
+        bad_list = []
+
+        for i in list_exam_full:
+            volume_GTV_CT = float(case.PatientModel.StructureSets[i].RoiGeometries[str(roi)].GetRoiVolume())
+            ratio_gtv_volume = float(volume_GTV_CT)/float(volume_GTV_ref)  #0.97
+            ratio_gtv_volume2 = (ratio_gtv_volume - 1) * 100  #-3.33 %
+            
+            if ratio_gtv_volume2 <= -10.0 or ratio_gtv_volume2 >= 10.0:
+                texte_gtv_warning += "\n " + str(i) + '(' + str(round(ratio_gtv_volume2, 2)) + ' %)'
+                bad_list.append(texte_gtv_warning)
+
+        if len(bad_list) == 0:
+            texte_gtv_warning = "GTV_ref_bin volume has difference within 10% to mapped GTVs on other bins" 
+            
+        print(texte_gtv_warning)
+   
+   
+    
+    #run above 2 functions above 
+    compare_GTV_4D_to_ITV_MDA()
+    #return round_MDA
+    
+    gtv_volume_compare()
+    #return texte_gtv_warning
+    
+    #messege box                
+    window = Tk()
+    window.eval('tk::PlaceWindow %s center' % window.winfo_toplevel())
+    window.withdraw()
+
+    messagebox.showinfo('MidV GTV deform v' + str(script_version), 'Script complete' + "\n" + "\n" +
+
+    "Please review the mapped roi on all 4D bins to ensure delineated properly" + "\n" + "\n" +    
+    
+    "MaxDistanceToAgreement [cm] (between the mapped summed targets and GTV_4D)" + ": " + str(round_MDA) + "\n" + "\n" +
+
+    "GTV volume comparison" + ": " + str(texte_gtv_warning) + "\n" + "\n")
+
+    window.deiconify()
+    window.destroy()
+    window.quit()
+    
+    
+    ###################################################################################################################################################################################################
+    ###################################################################################################################################################################################################
+    
+def calc_midv_margins():
+    #identify the examniations within the exam group of interest and number in total by len = 10/11?
+    examination_group = clicked2.get()
+
+    #loop through exam group above and append those 10/11 examinations to a list then remove the 3rd one after sorted?assumes 3rd is bin 3?
+    exams = case.ExaminationGroups[str(examination_group)].Items
+    
+    fourd_exams_list = []
+
+    for fourds in exams:
+        fourd_exams_list.append(fourds.ItemNumber)
+
+    fourd_exams_list.sort()
+
+    number_bins = len(fourd_exams_list)  # 10 or 11
+    
+    ##idenify bin3 examination name
+    if number_bins == 10:
+        bin1_exam = case.ExaminationGroups[str(examination_group)].Items[0].Examination.Name 
+        bin2_exam = case.ExaminationGroups[str(examination_group)].Items[1].Examination.Name 
+        bin3_exam = case.ExaminationGroups[str(examination_group)].Items[2].Examination.Name 
+        bin4_exam = case.ExaminationGroups[str(examination_group)].Items[3].Examination.Name 
+        bin5_exam = case.ExaminationGroups[str(examination_group)].Items[4].Examination.Name 
+        bin6_exam = case.ExaminationGroups[str(examination_group)].Items[5].Examination.Name 
+        bin7_exam = case.ExaminationGroups[str(examination_group)].Items[6].Examination.Name 
+        bin8_exam = case.ExaminationGroups[str(examination_group)].Items[7].Examination.Name 
+        bin9_exam = case.ExaminationGroups[str(examination_group)].Items[8].Examination.Name
+        bin10_exam = case.ExaminationGroups[str(examination_group)].Items[9].Examination.Name
+    elif number_bins != 10:
+        root = Tk()
+        root.withdraw()
+        messagebox.showerror("Error - MidV GTV deform v" + str(script_version), "Script works for ten 4D bins only")
+        exit()
+        
+                
+    #identify the roi of interert from user 
+    roi = clicked1.get()
+
+    #need skin/external on scans before any dir done so check and do if not there on all 4dct scans
+    #make exam bin3 primary first and then apply to all bins in exam group
+    RCT_exam = clicked3.get()
+
+    
+    #get center coordianates of mass of all GTVs on each bin
+    #Create a list that contains both the CTs in group and the selected one
+    list_exam_full = [str(bin1_exam), str(bin2_exam), str(bin3_exam), str(bin4_exam), str(bin5_exam), str(bin6_exam), str(bin7_exam), str(bin8_exam), str(bin9_exam), str(bin10_exam)]
+    #Initialize 3 list (one per direction x, y, z) to contain GTV center of each CT from the 4D setT
+    center_roi_x = []
+    center_roi_y = []
+    center_roi_z = []
+    #Iterate over the list content. #Calculate difference in GTV center based on each axis relative to the selected CT(exam_name)
+    for i in list_exam_full:
+        center_roi_x.append(case.PatientModel.StructureSets[i].RoiGeometries[str(roi)].GetCenterOfRoi().x)
+        center_roi_y.append(case.PatientModel.StructureSets[i].RoiGeometries[str(roi)].GetCenterOfRoi().y)
+        center_roi_z.append(case.PatientModel.StructureSets[i].RoiGeometries[str(roi)].GetCenterOfRoi().z)
+        
+    #Calculate the average of GTV center displacement according to each axis
+    mean_x = sum(center_roi_x)/len(center_roi_x) 
+    mean_y = sum(center_roi_y)/len(center_roi_y)
+    mean_z = sum(center_roi_z)/len(center_roi_z)
+    print ("coord. mid. P: x = ", mean_x, " ,y = ", mean_y, " ,z = ", mean_z)  #x = 8.922, y = 2.45, z = 10.858
+
+
+
+    ###SELECT MIDV CAL######
+    #Calculate the root mean square of the GTV in the selected CT(exam_name) relative the mean calculate over each axis
+    #Use the minimum value as starting point to find the smallest value in GTV center displacement from the mid-position
+    list_exam_5bins = [str(bin1_exam), str(bin2_exam), str(bin3_exam), str(bin4_exam), str(bin5_exam)]
+    #Initialize 3 list (one per direction x, y, z) to contain GTV center of each CT from the 4D setT
+    center_roi_x5bins = []
+    center_roi_y5bins = []
+    center_roi_z5bins = []
+    #Iterate over the list content. #Calculate difference in GTV center based on each axis relative to the selected CT(exam_name)
+    for i in list_exam_5bins:
+        center_roi_x5bins.append(case.PatientModel.StructureSets[i].RoiGeometries[str(roi)].GetCenterOfRoi().x)
+        center_roi_y5bins.append(case.PatientModel.StructureSets[i].RoiGeometries[str(roi)].GetCenterOfRoi().y)
+        center_roi_z5bins.append(case.PatientModel.StructureSets[i].RoiGeometries[str(roi)].GetCenterOfRoi().z)
+
+    rms_list = []
+    for center_idx in range(0, len(center_roi_x5bins)):
+            rms_list.append(math.sqrt(((center_roi_x5bins[center_idx] - mean_x)**2) +((center_roi_y5bins[center_idx] - mean_y)**2) + ((center_roi_z5bins[center_idx] - mean_z)**2)))
+        
+    #Initialize the variable chosen_ct as  being the CT allowing the initialization of the minimum variable
+    rms = min(rms_list)
+    print ("rms : ", rms) # rms: 0.032404
+    chosen_scan_id = rms_list.index(rms)
+    print ("chosen_scan_id : ", chosen_scan_id)  #chosen_scan_id : 1
+    chosen_ct = list_exam_full[chosen_scan_id]
+    print ("chosen_ct ; ", chosen_ct) #chosen ct: 4DCT3_02
+    print ("coord. mid. V: x = ", center_roi_x[chosen_scan_id], " ,y = ", center_roi_y[chosen_scan_id], " ,z = ", center_roi_z[chosen_scan_id]) # coord mid v:x = 8.948. y = 2.458, z = 10.8401
+
+
+    ##RANGE CALC#####
+    #Initialize 3 lists
+    distance_x = []
+    distance_y = []
+    distance_z = []
+    #Iterate over the CTs of the 4D CT group. #Add to each list the distance between the GTV center of the mid vent CT and the considered CT
+    for i in range(0,len(list_exam_full)):
+        distance_x.append(center_roi_x[chosen_scan_id] - center_roi_x[i])
+        distance_y.append(center_roi_y[chosen_scan_id] - center_roi_y[i])
+        distance_z.append(center_roi_z[chosen_scan_id] - center_roi_z[i])
+    #Calculate the maximum GTV center displacement amplitude relative to the mid-vent CT
+    amplitude_x = round(abs(max(distance_x) - min(distance_x)),2)  #0.106055   vs SJT 0.11
+    amplitude_y = round(abs(max(distance_y) - min(distance_y)),2)  #0.168141  vs SJT 0.19
+    amplitude_z = round(abs(max(distance_z) - min(distance_z)),2)  #0.1465334  vs SJT 0.16
+    
+    
+    #####################################CALCULATE PTV MARGINS REQUIRED AS PER FORMULA and plan type and user margin without breathing########################################
+    def round_up(n, decimals=0):    #round the ap and rl up to nearest 0.1cm (1mm)
+        multiplier = 10 ** decimals
+        return math.ceil(n * multiplier) / multiplier
+        
+    def round_to_multiple(number, multiple):   #rounds up to multiple of for example 0.3
+        return multiple * ceil(number / multiple)
+        
+    slice_spacing = 0.3
+    
+    sys_error = 1.83
+    rand_error = 1.83
+    constant_b = 1.46
+    penumbra_p = 5.5
+    #PTV RL margin
+    range_x = amplitude_x *10 # covert to mm
+    sig_br_x = 0.36 * range_x
+    val = rand_error**2 + penumbra_p**2 + sig_br_x**2
+    val2 = val**0.5
+    val3 = val2 - penumbra_p
+    val4 = val3 * constant_b
+    
+    PTV_Marginx = (2.5 * sys_error) + val4
+    PTV_Margin_x_cm = PTV_Marginx / 10 # convert to cm # 0.5030009707
+    
+    PTV_x = round_up(PTV_Margin_x_cm,1)  #0.6
+    
+    #PTV AP margin
+    range_y = amplitude_y * 10 #convert to mm
+    sig_br_y = 0.36 * range_y
+    val = rand_error**2 + penumbra_p**2 + sig_br_y**2
+    val2 = val**0.5
+    val3 = val2 - penumbra_p
+    val4 = val3 * constant_b
+    
+    PTV_Marginy = (2.5 * sys_error) + val4
+    PTV_Margin_y_cm = PTV_Marginy / 10 # convert to cm  #0.5063476
+    
+    PTV_y = round_up(PTV_Margin_y_cm,1)  #0.6
+    
+    #PTV SI margin
+    range_z = amplitude_z * 10 #convert to mm
+    sig_br_z = 0.36 * range_z
+    val = rand_error**2 + penumbra_p**2 + sig_br_z**2
+    val2 = val**0.5
+    val3 = val2 - penumbra_p
+    val4 = val3 * constant_b
+    
+    PTV_Marginz = (2.5 * sys_error) + val4
+    PTV_Margin_z_cm = PTV_Marginz / 10 # convert to cm ##0.505012544606038
+    
+    PTV_z = round_to_multiple(PTV_Margin_z_cm,slice_spacing)  #0.6 rounds UP to to nearest 0.3cm SI.        e.g 0.9055 goes to 1.2cm  eg. could go to 0.74598565 to 0.89999999999 so need another line below
+    PTV_z = round_to_multiple(PTV_z,0.1)  #for some reason mrn 4307045 gave 0.60000000000001 or something like this
+    PTV_z = round(PTV_z,1) #make it now 0.6
+    
+    
+    ###################################################################################################################################################################
+    
+    ##CREATE NEW ROI GTV WITH LABELLED BIN ON IT ‘GTV_MidV’- COPY GEOMETRY FROM MIDV BIN INTO IT AND ONTO PLANNING CT PLAN SCAN
+    examination = case.Examinations[str(chosen_ct)] # SET MIDV BIN AS PRIMARY FIRST
+    examination.SetPrimary()
+    
+    try:
+        retval_0 = case.PatientModel.CreateRoi(Name=r"GTV_MidV", Color="255, 0, 128", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+
+        retval_0.SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [str(roi)], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        
+        RCT_exam = clicked3.get()  #identify the RCT examniation
+
+        case.PatientModel.CopyRoiGeometries(SourceExamination=examination, TargetExaminationNames=[str(RCT_exam)], RoiNames=[r"GTV_MidV"], ImageRegistrationNames=[], TargetExaminationNamesToSkipAddedReg=[str(RCT_exam)])
+        
+        case.PatientModel.RegionsOfInterest['GTV_MidV'].DeleteExpression()
+       
+        ###GROW ‘GTV_MidV’ BY REQUIRED MARGINS TO THE PTV
+        examination = case.Examinations[str(RCT_exam)] # SET MIDV BIN AS PRIMARY FIRST
+        examination.SetPrimary()
+
+        retval_0 = case.PatientModel.CreateRoi(Name=r"PTV_MidV", Color="Red", Type="Ptv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+
+        retval_0.SetMarginExpression(SourceRoiName=r"GTV_MidV", MarginSettings={ 'Type': "Expand", 'Superior': PTV_z, 'Inferior': PTV_z, 'Anterior': PTV_y, 'Posterior': PTV_y, 'Right': PTV_x, 'Left': PTV_x })
+
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        
+        gtv_ptv_created = "'GTV_MidV' and 'PTV_MidV' created"
+     
+        #######################################################################################################################################################################
+        
+    except:
+        gtv_ptv_created = "'GTV_MidV' and 'PTV_MidV' not created as likely an roi with the same name already exists"
+    
+
+    #############################################################################################################################################################################
+    #excel log file output to script folder excel? send mrn, date time, com all bins, range rl ap si, ptv margins, bin used - j drive planning
+    try:
+        import datetime
+        import xlsxwriter
+        from openpyxl import Workbook, load_workbook
+
+        filepath = r'\\Client\J$\PLANNING'
+        os.chdir(filepath)
+
+        #time,plan,case
+        startTime = datetime.datetime.now()
+        caseName =case.CaseName
+        
+        #username
+        from System import Environment
+        staff_id = Environment.UserName
+
+        LogInfo = [str(startTime), patient.PatientID, str(caseName), str(staff_id) ,str(roi),
+        str(chosen_ct), #MidV vin dataset
+        str(round(mean_x,2)), str(round(mean_y,2)), str(round(mean_z,2)), #midp com
+        str(round(center_roi_x[chosen_scan_id],2)), str(round(center_roi_y[chosen_scan_id],2)), str(round(center_roi_z[chosen_scan_id],2)), #midv com
+        str(amplitude_x), str(amplitude_y), str(amplitude_z), #ranges
+        str(PTV_x), str(PTV_y), str(PTV_z)] #ptv margins
+            
+        print(LogInfo)
+
+        #log data excel j drive
+        wb = load_workbook(filename = 'MidV_log_v8.xlsx')
+        ws = wb['MidV_1']
+        ws.append(LogInfo)
+        wb.save('MidV_log_v8.xlsx')
+
+    except:
+        pass
+    ########################################################################################################################################################################
+    ######################################################################################################################################################################
+    
+    
+    ##window at end
+    window = Tk()
+    window.eval('tk::PlaceWindow %s center' % window.winfo_toplevel())
+    window.withdraw()
+
+    #messagebox at end with info
+    messagebox.showinfo('MidV GTV deform v' + str(script_version), 'Script complete and PTV_MidV is grown' + "\n" + "\n" + 
+    "MidV Bin is" + ": " + str(chosen_ct) + "\n" + "\n" +
+    
+    "##########################################" + "\n" + "\n" +
+    
+    "RL range (cm) is" + ": " + str(amplitude_x) + "\n" + "\n" +
+    
+    "AP range (cm) is" + ": " + str(amplitude_y) + "\n" + "\n" +
+    
+    "SI range (cm) is" + ": " + str(amplitude_z) + "\n" + "\n" +
+    
+    "##########################################" + "\n" + "\n" +
+    
+    "RL PTV margin (cm) is" + ": " + str(PTV_x) + "\n" + "\n" +
+    
+    "AP PTV margin (cm) is" + ": " + str(PTV_y) + "\n" + "\n" +
+    
+    "SI PTV margin (cm) is" + ": " + str(PTV_z) + "\n" + "\n" +
+    
+    "##########################################" + "\n" + "\n" +
+    
+    str(gtv_ptv_created) + "\n" + "\n" +
+    
+    "##########################################" + "\n" + "\n" +
+    
+    "RL & AP PTV margins rounded up to multiples of 0.1cm" + "\n" + "\n"
+    "SI PTV margins rounded up to multiples of 0.3cm" + "\n" + "\n")
+
+    window.deiconify()
+    window.destroy()
+    window.quit()
+   
+   
+   
+   
+   
+
+def check():
+    #identify the examniations within the exam group of interest and number in total by len = 10/11?
+    examination_group = clicked2.get()
+
+    #loop through exam group above and append those 10/11 examinations to a list then remove the 3rd one after sorted?assumes 3rd is bin 3?
+    exams = case.ExaminationGroups[str(examination_group)].Items
+    
+    fourd_exams_list = []
+
+    for fourds in exams:
+        fourd_exams_list.append(fourds.ItemNumber)
+
+    fourd_exams_list.sort()
+
+    number_bins = len(fourd_exams_list)  # 10 or 11
+    
+    ##idenify bin3 examination name
+    if number_bins == 10:
+        bin1_exam = case.ExaminationGroups[str(examination_group)].Items[0].Examination.Name 
+        bin2_exam = case.ExaminationGroups[str(examination_group)].Items[1].Examination.Name 
+        bin3_exam = case.ExaminationGroups[str(examination_group)].Items[2].Examination.Name 
+        bin4_exam = case.ExaminationGroups[str(examination_group)].Items[3].Examination.Name 
+        bin5_exam = case.ExaminationGroups[str(examination_group)].Items[4].Examination.Name 
+        bin6_exam = case.ExaminationGroups[str(examination_group)].Items[5].Examination.Name 
+        bin7_exam = case.ExaminationGroups[str(examination_group)].Items[6].Examination.Name 
+        bin8_exam = case.ExaminationGroups[str(examination_group)].Items[7].Examination.Name 
+        bin9_exam = case.ExaminationGroups[str(examination_group)].Items[8].Examination.Name
+        bin10_exam = case.ExaminationGroups[str(examination_group)].Items[9].Examination.Name
+    elif number_bins != 10:
+        root = Tk()
+        root.withdraw()
+        messagebox.showerror("Error - MidV GTV deform v" + str(script_version), "Script works for ten 4D bins only")
+        exit()
+        
+                
+    #identify the roi of interert from user 
+    roi = clicked1.get()
+
+    #check roi of interest exists on the bin3 exam from exam group above
+    roi_structures = case.PatientModel.StructureSets[str(bin3_exam)].RoiGeometries
+    if roi_structures[str(roi)].HasContours() is False:
+        root = Tk()
+        root.withdraw()
+        messagebox.showerror("Error - MidV GTV deform v" + str(script_version), "Contour" + str(roi) + "needs outlining first on bin3")
+        exit()
+
+    #need skin/external on scans before any dir done so check and do if not there on all 4dct scans
+    #make exam bin3 primary first and then apply to all bins in exam group
+    RCT_exam = clicked3.get()
+    
+    ###################################################################################################################################################################################################
+    ###################################################################################################################################################################################################
+    
+    #ensure gtv mapped on all 10bins of the 4dct exam selected - loop through the bins exams
+    all_bins_have_GTV = 0
+    def check_all_bins_mapped():
+        nonlocal all_bins_have_GTV
+        list_exam_full = [str(bin1_exam), str(bin2_exam), str(bin3_exam), str(bin4_exam), str(bin5_exam), str(bin6_exam), str(bin7_exam), str(bin8_exam), str(bin9_exam), str(bin10_exam)]
+
+        empty_bins = []
+        for i in list_exam_full:
+            all_bins_have_GTV = 'Some 4Dbins are missing the ' + str(roi)
+            if case.PatientModel.StructureSets[i].RoiGeometries[str(roi)].HasContours() is False:
+                all_bins_have_GTV += "\n " + str(i)
+                empty_bins.append(all_bins_have_GTV)
+                
+                root = Tk()
+                root.withdraw()
+                messagebox.showerror("Error - MidV v" + str(script_version), str(all_bins_have_GTV))
+                exit()
+                
+        #if len(empty_bins) != 0:
+            #all_bins_have_GTV = "No - some bins missing GTV_4D" + str(empty_bins)
+        if len(empty_bins) == 0:
+            all_bins_have_GTV = 'Yes all 4Dbins have the ' + str(roi) + ' mapped'
+            
+        print(all_bins_have_GTV)
+        
+    check_all_bins_mapped()
+    ###################################################################################################################################################################################################
+    ###################################################################################################################################################################################################
+    #GET MAX DISTANCE TO AGREEMENT ETC FOR ALL BINS SUMMED GTV VS DRS 4D GTV
+    round_MDA = 0
+    def compare_GTV_4D_to_ITV_MDA():
+        nonlocal round_MDA
+        roi = clicked1.get()
+        print(str(roi))
+        #create an itv roi fro all gtv bins and have its geometry on RCT3
+        #make 10 ITV_compare rois on RCT3 called ITV_compare1, ITV_compare2 etc 
+        case.PatientModel.CreateRoi(Name=r"ITV_compare1", Color="Cyan", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+        case.PatientModel.CreateRoi(Name=r"ITV_compare2", Color="Cyan", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+        case.PatientModel.CreateRoi(Name=r"ITV_compare3", Color="Cyan", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+        case.PatientModel.CreateRoi(Name=r"ITV_compare4", Color="Cyan", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+        case.PatientModel.CreateRoi(Name=r"ITV_compare5", Color="Cyan", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+        case.PatientModel.CreateRoi(Name=r"ITV_compare6", Color="Cyan", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+        case.PatientModel.CreateRoi(Name=r"ITV_compare7", Color="Cyan", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+        case.PatientModel.CreateRoi(Name=r"ITV_compare8", Color="Cyan", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+        case.PatientModel.CreateRoi(Name=r"ITV_compare9", Color="Cyan", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+        case.PatientModel.CreateRoi(Name=r"ITV_compare10", Color="Cyan", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+
+
+        #COPY 10 GTV BINS FROM THIER EXAMS INTO EACH ITV_compare1 etc
+        #make 4dct1 primary
+        examination = case.Examinations[str(bin1_exam)]
+        examination.SetPrimary()
+        #copy geometry of bin3 gtv into itv_compare1
+        retval_0 = case.PatientModel.RegionsOfInterest['ITV_compare1'].SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [str(roi)], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        #copy itv_compare geometry into RCT3
+        case.PatientModel.CopyRoiGeometries(SourceExamination=examination, TargetExaminationNames=[str(RCT_exam)], RoiNames=[r"ITV_compare1"], ImageRegistrationNames=[], TargetExaminationNamesToSkipAddedReg=[str(RCT_exam)])
+
+        #make 4dct1 primary
+        examination = case.Examinations[str(bin2_exam)]
+        examination.SetPrimary()
+        #copy geometry of bin3 gtv into itv_compare1
+        retval_0 = case.PatientModel.RegionsOfInterest['ITV_compare2'].SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [str(roi)], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        #copy itv_compare geometry into RCT3
+        case.PatientModel.CopyRoiGeometries(SourceExamination=examination, TargetExaminationNames=[str(RCT_exam)], RoiNames=[r"ITV_compare2"], ImageRegistrationNames=[], TargetExaminationNamesToSkipAddedReg=[str(RCT_exam)])
+
+        #make 4dct1 primary
+        examination = case.Examinations[str(bin3_exam)]
+        examination.SetPrimary()
+        #copy geometry of bin3 gtv into itv_compare1
+        retval_0 = case.PatientModel.RegionsOfInterest['ITV_compare3'].SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [str(roi)], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        #copy itv_compare geometry into RCT3
+        case.PatientModel.CopyRoiGeometries(SourceExamination=examination, TargetExaminationNames=[str(RCT_exam)], RoiNames=[r"ITV_compare3"], ImageRegistrationNames=[], TargetExaminationNamesToSkipAddedReg=[str(RCT_exam)])
+
+        #make 4dct1 primary
+        examination = case.Examinations[str(bin4_exam)]
+        examination.SetPrimary()
+        #copy geometry of bin3 gtv into itv_compare1
+        retval_0 = case.PatientModel.RegionsOfInterest['ITV_compare4'].SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [str(roi)], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        #copy itv_compare geometry into RCT3
+        case.PatientModel.CopyRoiGeometries(SourceExamination=examination, TargetExaminationNames=[str(RCT_exam)], RoiNames=[r"ITV_compare4"], ImageRegistrationNames=[], TargetExaminationNamesToSkipAddedReg=[str(RCT_exam)])
+
+        #make 4dct1 primary
+        examination = case.Examinations[str(bin5_exam)]
+        examination.SetPrimary()
+        #copy geometry of bin3 gtv into itv_compare1
+        retval_0 = case.PatientModel.RegionsOfInterest['ITV_compare5'].SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [str(roi)], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        #copy itv_compare geometry into RCT3
+        case.PatientModel.CopyRoiGeometries(SourceExamination=examination, TargetExaminationNames=[str(RCT_exam)], RoiNames=[r"ITV_compare5"], ImageRegistrationNames=[], TargetExaminationNamesToSkipAddedReg=[str(RCT_exam)])
+
+        #make 4dct1 primary
+        examination = case.Examinations[str(bin6_exam)]
+        examination.SetPrimary()
+        #copy geometry of bin3 gtv into itv_compare1
+        retval_0 = case.PatientModel.RegionsOfInterest['ITV_compare6'].SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [str(roi)], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        #copy itv_compare geometry into RCT3
+        case.PatientModel.CopyRoiGeometries(SourceExamination=examination, TargetExaminationNames=[str(RCT_exam)], RoiNames=[r"ITV_compare6"], ImageRegistrationNames=[], TargetExaminationNamesToSkipAddedReg=[str(RCT_exam)])
+
+        #make 4dct1 primary
+        examination = case.Examinations[str(bin7_exam)]
+        examination.SetPrimary()
+        #copy geometry of bin3 gtv into itv_compare1
+        retval_0 = case.PatientModel.RegionsOfInterest['ITV_compare7'].SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [str(roi)], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        #copy itv_compare geometry into RCT3
+        case.PatientModel.CopyRoiGeometries(SourceExamination=examination, TargetExaminationNames=[str(RCT_exam)], RoiNames=[r"ITV_compare7"], ImageRegistrationNames=[], TargetExaminationNamesToSkipAddedReg=[str(RCT_exam)])
+
+        #make 4dct1 primary
+        examination = case.Examinations[str(bin8_exam)]
+        examination.SetPrimary()
+        #copy geometry of bin3 gtv into itv_compare1
+        retval_0 = case.PatientModel.RegionsOfInterest['ITV_compare8'].SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [str(roi)], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        #copy itv_compare geometry into RCT3
+        case.PatientModel.CopyRoiGeometries(SourceExamination=examination, TargetExaminationNames=[str(RCT_exam)], RoiNames=[r"ITV_compare8"], ImageRegistrationNames=[], TargetExaminationNamesToSkipAddedReg=[str(RCT_exam)])
+
+        #make 4dct1 primary
+        examination = case.Examinations[str(bin9_exam)]
+        examination.SetPrimary()
+        #copy geometry of bin3 gtv into itv_compare1
+        retval_0 = case.PatientModel.RegionsOfInterest['ITV_compare9'].SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [str(roi)], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        #copy itv_compare geometry into RCT3
+        case.PatientModel.CopyRoiGeometries(SourceExamination=examination, TargetExaminationNames=[str(RCT_exam)], RoiNames=[r"ITV_compare9"], ImageRegistrationNames=[], TargetExaminationNamesToSkipAddedReg=[str(RCT_exam)])
+
+        #make 4dct1 primary
+        examination = case.Examinations[str(bin10_exam)]
+        examination.SetPrimary()
+        #copy geometry of bin3 gtv into itv_compare1
+        retval_0 = case.PatientModel.RegionsOfInterest['ITV_compare10'].SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [str(roi)], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+        #copy itv_compare geometry into RCT3
+        case.PatientModel.CopyRoiGeometries(SourceExamination=examination, TargetExaminationNames=[str(RCT_exam)], RoiNames=[r"ITV_compare10"], ImageRegistrationNames=[], TargetExaminationNamesToSkipAddedReg=[str(RCT_exam)])
+
+
+        #sum all ITV_compare rois to roi called ITV_compare_final
+        #make rct primary
+        examination = case.Examinations[str(RCT_exam)]
+        examination.SetPrimary()
+
+
+        retval_0 = case.PatientModel.CreateRoi(Name=r"ITV_compare_final", Color="Yellow", Type="Gtv", TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+
+        retval_0.SetAlgebraExpression(ExpressionA={ 'Operation': "Union", 'SourceRoiNames': [r"ITV_compare1", r"ITV_compare2", r"ITV_compare3", r"ITV_compare4", r"ITV_compare5", r"ITV_compare6", r"ITV_compare7", r"ITV_compare8", r"ITV_compare9", r"ITV_compare10"], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ExpressionB={ 'Operation': "Union", 'SourceRoiNames': [], 'MarginSettings': { 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 } }, ResultOperation="None", ResultMarginSettings={ 'Type': "Expand", 'Superior': 0, 'Inferior': 0, 'Anterior': 0, 'Posterior': 0, 'Right': 0, 'Left': 0 })
+
+        retval_0.UpdateDerivedGeometry(Examination=examination, Algorithm="Auto")
+
+        ####COMPARE THE itv roi with the GTV_4D roi on RCT3 . 
+        #CHECKS WE HAVE A 4DGTV ROI ON PLAN SCAN
+        rois = case.PatientModel.RegionsOfInterest 
+        roi_list = []
+        for roi in rois:
+            roi_list.append(roi.Name)
+            
+        if 'GTV_4D' not in roi_list:
+            await_user_input("Please ensure you have an roi called 'GTV_4D on planning CT. Click resume script once you have done this.")
+    
+    
+        measures = case.PatientModel.StructureSets[str(RCT_exam)].ComparisonOfRoiGeometries(RoiA = 'GTV_4D', RoiB = 'ITV_compare_final',ComputeDistanceToAgreementMeasures=True)
+
+        list(measures.items())[0]  #dice
+        list(measures.items())[1]  #precision
+        list(measures.items())[2]  #sensitivity
+        list(measures.items())[3]  #specificity
+        list(measures.items())[4]  #mean da
+        list(measures.items())[5]  #max da
+
+        print(measures["DiceSimilarityCoefficient"])  #0.936
+        print(measures["MaxDistanceToAgreement"])    #0.27
+        print(measures["MeanDistanceToAgreement"])  #0.04
+        print(measures["Precision"])  #0.881
+        print(measures["Sensitivity"])  #0.9924
+        print(measures["Specificity"])   #0.919
+        
+        round_MDA = round(measures["MaxDistanceToAgreement"],2)
+        print(round_MDA)
+
+        ###delete the 10 itv compares and itv final roi as not needed again
+        case.PatientModel.RegionsOfInterest['ITV_compare1'].DeleteRoi()
+        case.PatientModel.RegionsOfInterest['ITV_compare2'].DeleteRoi()
+        case.PatientModel.RegionsOfInterest['ITV_compare3'].DeleteRoi()
+        case.PatientModel.RegionsOfInterest['ITV_compare4'].DeleteRoi()
+        case.PatientModel.RegionsOfInterest['ITV_compare5'].DeleteRoi()
+        case.PatientModel.RegionsOfInterest['ITV_compare6'].DeleteRoi()
+        case.PatientModel.RegionsOfInterest['ITV_compare7'].DeleteRoi()
+        case.PatientModel.RegionsOfInterest['ITV_compare8'].DeleteRoi()
+        case.PatientModel.RegionsOfInterest['ITV_compare9'].DeleteRoi()
+        case.PatientModel.RegionsOfInterest['ITV_compare10'].DeleteRoi()
+        case.PatientModel.RegionsOfInterest['ITV_compare_final'].DeleteRoi()
+
+        ###################################################################################################################################################################################################
+    
+        ###################################################################################################################################################################################################
+    texte_gtv_warning = 0    
+    def gtv_volume_compare():
+        roi = clicked1.get()
+        print(str(roi))
+        nonlocal texte_gtv_warning
+        list_exam_full = [str(bin1_exam), str(bin2_exam), str(bin3_exam), str(bin4_exam), str(bin5_exam), str(bin6_exam), str(bin7_exam), str(bin8_exam), str(bin9_exam), str(bin10_exam)]
+
+        texte_gtv_warning = "GTV_bin3 volume has difference greater than 10% from other GTVs" 
+
+        volume_GTV_ref = round(case.PatientModel.StructureSets[str(bin3_exam)].RoiGeometries[str(roi)].GetRoiVolume(),2)
+
+        bad_list = []
+
+        for i in list_exam_full:
+            volume_GTV_CT = float(case.PatientModel.StructureSets[i].RoiGeometries[str(roi)].GetRoiVolume())
+            ratio_gtv_volume = float(volume_GTV_CT)/float(volume_GTV_ref)  #0.97
+            ratio_gtv_volume2 = (ratio_gtv_volume - 1) * 100  #-3.33 %
+            
+            if ratio_gtv_volume2 <= -10.0 or ratio_gtv_volume2 >= 10.0:
+                texte_gtv_warning += "\n " + str(i) + '(' + str(round(ratio_gtv_volume2, 2)) + ' %)'
+                bad_list.append(texte_gtv_warning)
+
+        if len(bad_list) == 0:
+            texte_gtv_warning = str(roi) + ' volume has a difference within 10% to each mapped ' + str(roi) + ' on the other bins' 
+            
+        print(texte_gtv_warning)
+   
+   
+    
+    #run above 2 functions above 
+    compare_GTV_4D_to_ITV_MDA()
+    
+    gtv_volume_compare()
+        ###################################################################################################################################################################################################
+    
+        ###################################################################################################################################################################################################
+    MidV_for_imaging = 0    
+    def check_midV_for_imaging():
+        nonlocal MidV_for_imaging
+        #Confirm that there is a MidV_useforimaging volume on RCT1 which is the GTV_4D grown by isotropic 5mm margins. This volume is needed for position verification on set
+        rois = case.PatientModel.RegionsOfInterest 
+        roi_list = []
+        for roi in rois:
+            roi_list.append(roi.Name)
+            
+        if 'MidV_useforimaging' not in roi_list:
+            MidV_for_imaging = "'MidV_useforimaging' roi is NOT present"
+        else:
+            MidV_for_imaging = "'MidV_useforimaging' roi is present"
+            
+        print(MidV_for_imaging)
+    
+    check_midV_for_imaging()
+    ###################################################################################################################################################################################################
+    ###################################################################################################################################################################################################
+    
+    #get center coordianates of mass of all GTVs on each bin
+    #Create a list that contains both the CTs in group and the selected one
+    list_exam_full = [str(bin1_exam), str(bin2_exam), str(bin3_exam), str(bin4_exam), str(bin5_exam), str(bin6_exam), str(bin7_exam), str(bin8_exam), str(bin9_exam), str(bin10_exam)]
+    #Initialize 3 list (one per direction x, y, z) to contain GTV center of each CT from the 4D setT
+    center_roi_x = []
+    center_roi_y = []
+    center_roi_z = []
+    #Iterate over the list content. #Calculate difference in GTV center based on each axis relative to the selected CT(exam_name)
+    for i in list_exam_full:
+        center_roi_x.append(case.PatientModel.StructureSets[i].RoiGeometries[str(roi)].GetCenterOfRoi().x)
+        center_roi_y.append(case.PatientModel.StructureSets[i].RoiGeometries[str(roi)].GetCenterOfRoi().y)
+        center_roi_z.append(case.PatientModel.StructureSets[i].RoiGeometries[str(roi)].GetCenterOfRoi().z)
+        
+    #Calculate the average of GTV center displacement according to each axis
+    mean_x = sum(center_roi_x)/len(center_roi_x) 
+    mean_y = sum(center_roi_y)/len(center_roi_y)
+    mean_z = sum(center_roi_z)/len(center_roi_z)
+    print ("coord. mid. P: x = ", mean_x, " ,y = ", mean_y, " ,z = ", mean_z)  #x = 8.922, y = 2.45, z = 10.858
+
+    ###SELECT MIDV CAL######
+    #Calculate the root mean square of the GTV in the selected CT(exam_name) relative the mean calculate over each axis
+    #Use the minimum value as starting point to find the smallest value in GTV center displacement from the mid-position
+    list_exam_5bins = [str(bin1_exam), str(bin2_exam), str(bin3_exam), str(bin4_exam), str(bin5_exam)]
+    #Initialize 3 list (one per direction x, y, z) to contain GTV center of each CT from the 4D setT
+    center_roi_x5bins = []
+    center_roi_y5bins = []
+    center_roi_z5bins = []
+    #Iterate over the list content. #Calculate difference in GTV center based on each axis relative to the selected CT(exam_name)
+    for i in list_exam_5bins:
+        center_roi_x5bins.append(case.PatientModel.StructureSets[i].RoiGeometries[str(roi)].GetCenterOfRoi().x)
+        center_roi_y5bins.append(case.PatientModel.StructureSets[i].RoiGeometries[str(roi)].GetCenterOfRoi().y)
+        center_roi_z5bins.append(case.PatientModel.StructureSets[i].RoiGeometries[str(roi)].GetCenterOfRoi().z)
+
+    rms_list = []
+    for center_idx in range(0, len(center_roi_x5bins)):
+            rms_list.append(math.sqrt(((center_roi_x5bins[center_idx] - mean_x)**2) +((center_roi_y5bins[center_idx] - mean_y)**2) + ((center_roi_z5bins[center_idx] - mean_z)**2)))
+        
+    #Initialize the variable chosen_ct as  being the CT allowing the initialization of the minimum variable
+    rms = min(rms_list)
+    print ("rms : ", rms) # rms: 0.032404
+    chosen_scan_id = rms_list.index(rms)
+    print ("chosen_scan_id : ", chosen_scan_id)  #chosen_scan_id : 1
+    chosen_ct = list_exam_full[chosen_scan_id]
+    print ("chosen_ct ; ", chosen_ct) #chosen ct: 4DCT3_02
+    print ("coord. mid. V: x = ", center_roi_x[chosen_scan_id], " ,y = ", center_roi_y[chosen_scan_id], " ,z = ", center_roi_z[chosen_scan_id]) # coord mid v:x = 8.948. y = 2.458, z = 10.8401
+
+
+    ##RANGE CALC#####
+    #Initialize 3 lists
+    distance_x = []
+    distance_y = []
+    distance_z = []
+    #Iterate over the CTs of the 4D CT group. #Add to each list the distance between the GTV center of the mid vent CT and the considered CT
+    for i in range(0,len(list_exam_full)):
+        distance_x.append(center_roi_x[chosen_scan_id] - center_roi_x[i])
+        distance_y.append(center_roi_y[chosen_scan_id] - center_roi_y[i])
+        distance_z.append(center_roi_z[chosen_scan_id] - center_roi_z[i])
+    #Calculate the maximum GTV center displacement amplitude relative to the mid-vent CT
+    
+    amplitude_x = round(abs(max(distance_x) - min(distance_x)),2)  #0.106055   vs SJT 0.11
+    amplitude_y = round(abs(max(distance_y) - min(distance_y)),2)  #0.168141  vs SJT 0.19
+    amplitude_z = round(abs(max(distance_z) - min(distance_z)),2)  #0.1465334  vs SJT 0.16
+    
+    
+    #####################################CALCULATE PTV MARGINS REQUIRED AS PER FORMULA and plan type and user margin without breathing########################################
+    def round_up(n, decimals=0):    #round the ap and rl up to nearest 0.1cm (1mm)
+        multiplier = 10 ** decimals
+        return math.ceil(n * multiplier) / multiplier
+        
+    def round_to_multiple(number, multiple):   #rounds up to multiple of for example 0.3
+        return multiple * ceil(number / multiple)
+        
+    slice_spacing = 0.3
+    
+    sys_error = 1.83
+    rand_error = 1.83
+    constant_b = 1.46
+    penumbra_p = 5.5
+    #PTV RL margin
+    range_x = amplitude_x *10 # covert to mm
+    sig_br_x = 0.36 * range_x
+    val = rand_error**2 + penumbra_p**2 + sig_br_x**2
+    val2 = val**0.5
+    val3 = val2 - penumbra_p
+    val4 = val3 * constant_b
+    
+    PTV_Marginx = (2.5 * sys_error) + val4
+    PTV_Margin_x_cm = PTV_Marginx / 10 # convert to cm # 0.5030009707
+    
+    PTV_x = round_up(PTV_Margin_x_cm,1)  #0.6
+    
+    #PTV AP margin
+    range_y = amplitude_y * 10 #convert to mm
+    sig_br_y = 0.36 * range_y
+    val = rand_error**2 + penumbra_p**2 + sig_br_y**2
+    val2 = val**0.5
+    val3 = val2 - penumbra_p
+    val4 = val3 * constant_b
+    
+    PTV_Marginy = (2.5 * sys_error) + val4
+    PTV_Margin_y_cm = PTV_Marginy / 10 # convert to cm  #0.5063476
+    
+    PTV_y = round_up(PTV_Margin_y_cm,1)  #0.6
+    
+    #PTV SI margin
+    range_z = amplitude_z * 10 #convert to mm
+    sig_br_z = 0.36 * range_z
+    val = rand_error**2 + penumbra_p**2 + sig_br_z**2
+    val2 = val**0.5
+    val3 = val2 - penumbra_p
+    val4 = val3 * constant_b
+    
+    PTV_Marginz = (2.5 * sys_error) + val4
+    PTV_Margin_z_cm = PTV_Marginz / 10 # convert to cm ##0.505012544606038
+    
+    PTV_z = round_to_multiple(PTV_Margin_z_cm,slice_spacing)  #0.6 rounds UP to to nearest 0.3cm SI.        e.g 0.9055 goes to 1.2cm   eg. could go to 0.74598565 to 0.89999999999 so need another line below
+    PTV_z = round_to_multiple(PTV_z,0.1)
+    PTV_z = round(PTV_z,1) #make it now 0.6
+    
+    ###################################################################################################################################################################
+  
+    
+    
+    
+    
+    
+    
+    ##window at end
+    window = Tk()
+    window.eval('tk::PlaceWindow %s center' % window.winfo_toplevel())
+    window.withdraw()
+
+    #messagebox at end with info
+    messagebox.showinfo('MidV GTV deform v' + str(script_version), 'Checker Script complete' + "\n" + "\n" + 
+    "MidV Bin is" + ": " + str(chosen_ct) + "\n" + "\n" +
+    
+    "##########################################" + "\n" + "\n" +
+    
+    "Any Empty 4Dbins not mapped?" + ": " + str(all_bins_have_GTV) + "\n" + "\n" +
+    
+    "MaxDistanceToAgreement [cm] (between the mapped summed targets and GTV_4D)" + ": " + str(round_MDA) + "\n" + "\n" +
+
+    "GTV volume comparison" + ": " + str(texte_gtv_warning) + "\n" + "\n" +
+    
+    "MidV_for_imaging roi present?" + ": " + str(MidV_for_imaging) + "\n" + "\n" +
+    
+    "##########################################" + "\n" + "\n" +
+    
+    "RL range (cm) is" + ": " + str(amplitude_x) + "\n" + "\n" +
+    
+    "AP range (cm) is" + ": " + str(amplitude_y) + "\n" + "\n" +
+    
+    "SI range (cm) is" + ": " + str(amplitude_z) + "\n" + "\n" +
+    
+    "##########################################" + "\n" + "\n" +
+    
+    "RL PTV margin (cm) is" + ": " + str(PTV_x) + "\n" + "\n" +
+    
+    "AP PTV margin (cm) is" + ": " + str(PTV_y) + "\n" + "\n" +
+    
+    "SI PTV margin (cm) is" + ": " + str(PTV_z) + "\n" + "\n" +
+    
+    "##########################################" + "\n" + "\n" +
+    
+    "RL & AP PTV margins rounded up to multiples of 0.1cm" + "\n" + "\n"
+    "SI PTV margins rounded up to multiples of 0.3cm" + "\n" + "\n")
+
+    window.deiconify()
+    window.destroy()
+    window.quit()
+    
+
+def Button_pressed2():
+    root.destroy()
+
+#label plan name
+lbl11 = Label(root, text='Select reference target (e.g GTV_bin3)')
+lbl11.place(x=10,y=50)
+
+
+#drop down box for roi select target of interest
+clicked1 = StringVar()
+#clicked1.set("Select target to deform")
+clicked1.set(roi_list[0])
+drop1 = OptionMenu(root, clicked1, *roi_list)
+drop1.place(x=250, y=50)
+
+
+
+#label 4d group name
+lbl12 = Label(root, text='Select 4D Exam Group')
+lbl12.place(x=10,y=150)
+
+#drop down box for 4D exam group
+clicked2 = StringVar()
+#clicked2.set("Select 4D Exam Group")
+clicked2.set(EGS_list[0])
+drop2 = OptionMenu(root, clicked2, *EGS_list)
+drop2.place(x=200, y=150)
+
+
+
+#label RCT name
+lbl13 = Label(root, text='Select Planning CT')
+lbl13.place(x=10,y=250)
+
+#drop down box for RCT
+clicked3 = StringVar()
+#clicked3.set("Select Planning CT")
+clicked3.set(RCTS_list[0])
+drop3 = OptionMenu(root, clicked3, *RCTS_list)
+drop3.place(x=200, y=250)
+
+
+
+#label plan type
+lbl14 = Label(root, text='Select Plan Type')
+lbl14.place(x=10,y=350)
+
+#drop down box for plan type
+clicked4 = StringVar()
+clicked4.set("SABR Lung")
+drop4 = OptionMenu(root, clicked4, "SABR Lung")
+drop4.place(x=200, y=350)
+
+#label margins
+lbl15 = Label(root, text='Margins excluding breathing')
+lbl15.place(x=10,y=450)
+
+#drop down box for plan type
+clicked5 = StringVar()
+clicked5.set("Isotropic 5mm")
+drop5 = OptionMenu(root, clicked5, "Isotropic 5mm")
+drop5.place(x=200, y=450)
+
+
+##button to deform only for planner review
+myButton = Button(root, text="Step 1: Planner - Deform GTV to all bins", command=MidV)
+myButton.place(x=10, y=550)
+
+
+##button for planner only to calc midv and create midv ptv
+myButton1 = Button(root, text="Step 2: Planner - Calculate MidV bin & create GTV_MidV & PTV_MidV", command=calc_midv_margins)
+myButton1.place(x=10, y=600)
+
+
+
+##cancel button
+butt2 = Button(root, text = 'Quit', command = Button_pressed2)
+butt2.place(x=280, y=550)
+
+##checker button
+butt2 = Button(root, text = 'Checker - Show midV bin & PTV margins', command = check)
+butt2.place(x=350, y=550)
+
+root.mainloop()
